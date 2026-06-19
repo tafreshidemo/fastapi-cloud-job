@@ -1,0 +1,189 @@
+services:
+  migrate:
+    build:
+      context: .
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cloud_job
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cloud_job_test
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      JWT_SECRET: change-me-to-a-long-random-secret
+    command:
+      [
+        "sh",
+        "-c",
+        "python -m app.cli.prepare_local_databases && python -m alembic upgrade head",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cloud_job
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "54329:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cloud_job"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  api:
+    build:
+      context: .
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cloud_job
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cloud_job_test
+      TEST_REDIS_URL: redis://redis:6379/1
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TEST_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TEST_RABBITMQ_RUNTIME_URL: amqp://guest:guest@rabbitmq:5672/
+      JWT_SECRET: change-me-to-a-long-random-secret
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  worker:
+    build:
+      context: .
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cloud_job
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      JWT_SECRET: change-me-to-a-long-random-secret
+      HEALTHCHECK_FILE: /tmp/worker-heartbeat
+    command: ["python", "-m", "app.cli.run_job_worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from pathlib import Path; import time; path=Path('/tmp/worker-heartbeat'); assert path.exists() and time.time()-path.stat().st_mtime < 15",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+  outbox-publisher:
+    build:
+      context: .
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cloud_job
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      JWT_SECRET: change-me-to-a-long-random-secret
+      HEALTHCHECK_FILE: /tmp/outbox-publisher-heartbeat
+    command: ["python", "-m", "app.cli.run_outbox_publisher"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from pathlib import Path; import time; path=Path('/tmp/outbox-publisher-heartbeat'); assert path.exists() and time.time()-path.stat().st_mtime < 15",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+  test:
+    build:
+      context: .
+    profiles:
+      - test
+    environment:
+      APP_ENV: test
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cloud_job
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cloud_job_test
+      TEST_REDIS_URL: redis://redis:6379/1
+      TEST_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TEST_RABBITMQ_RUNTIME_URL: amqp://guest:guest@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      JWT_SECRET: change-me-to-a-long-random-secret
+    command:
+      [
+        "sh",
+        "-c",
+        "python -m app.cli.prepare_local_databases && python -m pytest -q",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+volumes:
+  postgres_data:
+  rabbitmq_data:
